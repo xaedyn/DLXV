@@ -1,0 +1,29 @@
+name: DLXV
+
+options:
+  bundleIdPrefix: com.dlxv
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.0.1"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  DLXV:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_NAME: DLXV
+        PRODUCT_BUNDLE_IDENTIFIER: com.dlxv.DLXV
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: DLXV
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.video"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic

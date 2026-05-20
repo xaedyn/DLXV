@@ -1,0 +1,21 @@
+# XcodeGen generates DLXV.xcodeproj from project.yml — do not commit it
+*.xcodeproj
+
+# Xcode
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# macOS
+.DS_Store
+
+# Test media — large files, sourced locally (see TestContent/SOURCES.md)
+TestContent/*.mov
+TestContent/*.mp4
+TestContent/*.mkv
+TestContent/*.m4v
