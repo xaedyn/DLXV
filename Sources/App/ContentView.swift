@@ -1,15 +1,15 @@
-import AVKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @State private var player: AVPlayer?
+    @State private var engine = PlayerEngine()
+    @State private var hasVideo = false
 
     var body: some View {
         ZStack {
             Color.black
-            if let player {
-                VideoPlayer(player: player)
+            if hasVideo {
+                MetalVideoView(engine: engine)
             } else {
                 PlaceholderView(onPick: open)
             }
@@ -23,9 +23,8 @@ struct ContentView: View {
     }
 
     private func open(_ url: URL) {
-        let newPlayer = AVPlayer(url: url)
-        player = newPlayer
-        newPlayer.play()
+        engine.open(url)
+        hasVideo = true
     }
 }
 
