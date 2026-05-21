@@ -11,7 +11,10 @@ final class PlayerEngine {
     func open(_ url: URL) {
         let item = AVPlayerItem(url: url)
         let attributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferPixelFormatTypeKey as String: [
+                kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            ],
             kCVPixelBufferMetalCompatibilityKey as String: true,
         ]
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: attributes)

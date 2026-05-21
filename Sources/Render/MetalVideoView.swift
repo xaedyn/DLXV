@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import CoreVideo
 import QuartzCore
 import SwiftUI
@@ -34,7 +35,8 @@ final class MetalVideoLayerView: NSView {
     override func makeBackingLayer() -> CALayer {
         let metalLayer = CAMetalLayer()
         metalLayer.device = renderer?.device
-        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.pixelFormat = .rgba16Float
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.itur_709)
         metalLayer.framebufferOnly = true
         return metalLayer
     }
