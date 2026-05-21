@@ -27,3 +27,27 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.video"
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Automatic
+
+  DLXVTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: DLXV
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dlxv.DLXVTests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  DLXV:
+    build:
+      targets:
+        DLXV: all
+        DLXVTests: [test]
+    test:
+      targets:
+        - DLXVTests
+    run:
+      config: Debug
