@@ -18,6 +18,8 @@ targets:
     platform: macOS
     sources:
       - path: Sources
+    dependencies:
+      - sdk: AVKit.framework
     settings:
       base:
         PRODUCT_NAME: DLXV
