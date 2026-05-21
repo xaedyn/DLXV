@@ -15,11 +15,12 @@ struct MetalVideoView: NSViewRepresentable {
     func updateNSView(_ nsView: MetalVideoLayerView, context: Context) {}
 }
 
-/// An NSView backed by a CAMetalLayer. A display link pulls the decoded frame
-/// for each screen refresh and hands it to the renderer.
+/// An NSView backed by an EDR-enabled CAMetalLayer. A display link pulls the
+/// decoded frame for each screen refresh and hands it to the renderer.
 final class MetalVideoLayerView: NSView {
     private let engine: PlayerEngine
     private let renderer: VideoRenderer?
+    private let edrMonitor = EDRMonitor()
     private var renderLink: CADisplayLink?
 
     init(engine: PlayerEngine) {
@@ -36,7 +37,8 @@ final class MetalVideoLayerView: NSView {
         let metalLayer = CAMetalLayer()
         metalLayer.device = renderer?.device
         metalLayer.pixelFormat = .rgba16Float
-        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.itur_709)
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        metalLayer.wantsExtendedDynamicRangeContent = true
         metalLayer.framebufferOnly = true
         return metalLayer
     }
@@ -45,6 +47,7 @@ final class MetalVideoLayerView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        edrMonitor.attach(to: window)
         if window != nil {
             updateDrawableSize()
             startRenderLink()
@@ -86,6 +89,6 @@ final class MetalVideoLayerView: NSView {
         guard let renderer, let metalLayer,
               let pixelBuffer = engine.copyPixelBufferForDisplay()
         else { return }
-        renderer.render(pixelBuffer: pixelBuffer, to: metalLayer)
+        renderer.render(pixelBuffer: pixelBuffer, to: metalLayer, headroom: edrMonitor.headroom)
     }
 }

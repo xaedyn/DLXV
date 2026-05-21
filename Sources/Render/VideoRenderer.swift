@@ -4,9 +4,17 @@ import Metal
 import QuartzCore
 import simd
 
+/// The transfer function of the decoded video, matching the shader's branch IDs.
+private enum TransferFunction: UInt32 {
+    case sdr = 0
+    case pq = 1
+    case hlg = 2
+}
+
 /// Renders decoded biplanar YCbCr video frames to a CAMetalLayer with no
 /// CPU-side pixel copies. Each plane's IOSurface-backed memory is wrapped
-/// directly as a Metal texture; the shader performs the YCbCr -> RGB conversion.
+/// directly as a Metal texture; the shader performs color conversion, HDR
+/// transfer-function decoding, gamut conversion, and tone mapping.
 @MainActor
 final class VideoRenderer {
     let device: any MTLDevice
@@ -53,7 +61,7 @@ final class VideoRenderer {
         self.textureCache = cache
     }
 
-    func render(pixelBuffer: CVPixelBuffer, to layer: CAMetalLayer) {
+    func render(pixelBuffer: CVPixelBuffer, to layer: CAMetalLayer, headroom: Float) {
         // Skip this frame instead of blocking the main thread if the GPU is behind.
         guard inFlightSemaphore.wait(timeout: .now()) == .success else { return }
         var completionOwnsPermit = false
@@ -70,6 +78,9 @@ final class VideoRenderer {
                                    into: layer.drawableSize)
         var colorMatrix = frame.conversion.matrix
         var colorOffset = frame.conversion.offset
+        var gamutMatrix = frame.gamut.matrix
+        var transferFunction = frame.transferFunction.rawValue
+        var displayHeadroom = max(headroom, 1.0)
 
         let passDescriptor = MTLRenderPassDescriptor()
         passDescriptor.colorAttachments[0].texture = drawable.texture
@@ -87,6 +98,9 @@ final class VideoRenderer {
         encoder.setFragmentTexture(chroma.texture, index: 1)
         encoder.setFragmentBytes(&colorMatrix, length: MemoryLayout<simd_float3x3>.stride, index: 0)
         encoder.setFragmentBytes(&colorOffset, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+        encoder.setFragmentBytes(&gamutMatrix, length: MemoryLayout<simd_float3x3>.stride, index: 2)
+        encoder.setFragmentBytes(&transferFunction, length: MemoryLayout<UInt32>.stride, index: 3)
+        encoder.setFragmentBytes(&displayHeadroom, length: MemoryLayout<Float>.stride, index: 4)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 
@@ -109,6 +123,8 @@ final class VideoRenderer {
         let lumaFormat: MTLPixelFormat
         let chromaFormat: MTLPixelFormat
         let conversion: ColorConversion
+        let gamut: GamutConversion
+        let transferFunction: TransferFunction
     }
 
     /// Reads the pixel format and color metadata needed to render the frame,
@@ -131,15 +147,24 @@ final class VideoRenderer {
             return nil
         }
 
-        let fallback: ColorConversion.Standard = switch bitDepth {
+        let fallbackStandard: ColorConversion.Standard = switch bitDepth {
         case .ten: .rec2020
         case .eight: .rec709
         }
-        return DecodedFrame(
-            lumaFormat: lumaFormat,
-            chromaFormat: chromaFormat,
-            conversion: ColorConversion(standard: ycbcrStandard(of: pixelBuffer, fallback: fallback),
-                                        bitDepth: bitDepth))
+        let fallbackPrimaries: GamutConversion.Primaries = switch bitDepth {
+        case .ten: .rec2020
+        case .eight: .rec709
+        }
+
+        let conversion = ColorConversion(
+            standard: ycbcrStandard(of: pixelBuffer, fallback: fallbackStandard),
+            bitDepth: bitDepth)
+        let gamut = GamutConversion(
+            from: sourcePrimaries(of: pixelBuffer, fallback: fallbackPrimaries),
+            to: .displayP3)
+        return DecodedFrame(lumaFormat: lumaFormat, chromaFormat: chromaFormat,
+                            conversion: conversion, gamut: gamut,
+                            transferFunction: transferFunction(of: pixelBuffer))
     }
 
     /// Reads the YCbCr matrix attachment, falling back when it is absent.
@@ -151,6 +176,26 @@ final class VideoRenderer {
         if name == kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String { return .rec601 }
         if name == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String { return .rec709 }
         return fallback
+    }
+
+    /// Reads the color primaries attachment, falling back when it is absent.
+    private func sourcePrimaries(of pixelBuffer: CVPixelBuffer,
+                                 fallback: GamutConversion.Primaries) -> GamutConversion.Primaries {
+        guard let name = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) as? String
+        else { return fallback }
+        if name == kCVImageBufferColorPrimaries_ITU_R_2020 as String { return .rec2020 }
+        if name == kCVImageBufferColorPrimaries_ITU_R_709_2 as String { return .rec709 }
+        if name == kCVImageBufferColorPrimaries_P3_D65 as String { return .displayP3 }
+        return fallback
+    }
+
+    /// Reads the transfer function attachment, defaulting to SDR when absent.
+    private func transferFunction(of pixelBuffer: CVPixelBuffer) -> TransferFunction {
+        guard let name = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) as? String
+        else { return .sdr }
+        if name == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String { return .pq }
+        if name == kCVImageBufferTransferFunction_ITU_R_2100_HLG as String { return .hlg }
+        return .sdr
     }
 
     private func makeTexture(
