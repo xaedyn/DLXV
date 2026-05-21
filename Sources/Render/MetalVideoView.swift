@@ -16,7 +16,8 @@ struct MetalVideoView: NSViewRepresentable {
 }
 
 /// An NSView backed by an EDR-enabled CAMetalLayer. A display link pulls the
-/// decoded frame for each screen refresh and hands it to the renderer.
+/// decoded frame for each screen refresh and hands it to the renderer. The
+/// view also handles keyboard and click playback controls.
 final class MetalVideoLayerView: NSView {
     private let engine: PlayerEngine
     private let renderer: VideoRenderer?
@@ -32,6 +33,8 @@ final class MetalVideoLayerView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not supported") }
+
+    override var acceptsFirstResponder: Bool { true }
 
     override func makeBackingLayer() -> CALayer {
         let metalLayer = CAMetalLayer()
@@ -51,6 +54,7 @@ final class MetalVideoLayerView: NSView {
         if window != nil {
             updateDrawableSize()
             startRenderLink()
+            window?.makeFirstResponder(self)
         } else {
             stopRenderLink()
         }
@@ -90,5 +94,25 @@ final class MetalVideoLayerView: NSView {
               let pixelBuffer = engine.copyPixelBufferForDisplay()
         else { return }
         renderer.render(pixelBuffer: pixelBuffer, to: metalLayer, headroom: edrMonitor.headroom)
+    }
+
+    // MARK: - Playback controls
+
+    override func mouseDown(with event: NSEvent) {
+        engine.togglePlayPause()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 49: engine.togglePlayPause()    // space
+        case 123: engine.seek(by: -10)        // left arrow
+        case 124: engine.seek(by: 10)         // right arrow
+        default:
+            if event.charactersIgnoringModifiers == "f" {
+                window?.toggleFullScreen(nil)
+            } else {
+                super.keyDown(with: event)
+            }
+        }
     }
 }

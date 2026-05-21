@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @State private var engine = PlayerEngine()
     @State private var hasVideo = false
+    @State private var windowTitle = "DLXV"
 
     var body: some View {
         ZStack {
@@ -15,6 +16,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 405)
+        .navigationTitle(windowTitle)
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
             open(url)
@@ -25,6 +27,7 @@ struct ContentView: View {
     private func open(_ url: URL) {
         engine.open(url)
         hasVideo = true
+        windowTitle = url.deletingPathExtension().lastPathComponent
     }
 }
 
