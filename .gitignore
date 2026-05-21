@@ -19,3 +19,6 @@ TestContent/*.mov
 TestContent/*.mp4
 TestContent/*.mkv
 TestContent/*.m4v
+
+# Local-only working reference — kept out of the public repo
+docs/RENDERING-TECHNIQUES.md
