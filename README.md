@@ -2,14 +2,13 @@
 
 **Deluxe video. For Mac.**
 
-A premium native macOS video player for Apple Silicon — HDR rendered correctly,
-Plex and Jellyfin clients built in, on-device AI subtitles. Currently in early
+A native macOS video player for Apple Silicon — accurate HDR rendering,
+media-library support, and on-device subtitle generation. Currently in early
 development.
 
 ## Status
 
-**Phase 0 — validation.** Building the HDR rendering proof-of-concept that
-demonstrates a visible quality difference against existing players.
+**Phase 0 — validation.** Building the HDR rendering proof-of-concept.
 
 ## Requirements
 
