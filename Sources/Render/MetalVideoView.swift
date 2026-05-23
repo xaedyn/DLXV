@@ -24,6 +24,11 @@ final class MetalVideoLayerView: NSView {
     private let edrMonitor = EDRMonitor()
     private var renderLink: CADisplayLink?
 
+    // The frame rate currently programmed into the display link. Kept here so
+    // we only reprogram the link when the engine's reported rate actually
+    // changes (e.g. when a new file with a different frame rate is opened).
+    private var appliedFrameRate: Float = 0
+
     init(engine: PlayerEngine) {
         self.engine = engine
         self.renderer = VideoRenderer()
@@ -90,6 +95,16 @@ final class MetalVideoLayerView: NSView {
     }
 
     @objc private func renderFrame(_ link: CADisplayLink) {
+        // Match the display link to the current video's frame rate. ProMotion
+        // (and VRR external displays) can then downshift the panel instead of
+        // refreshing faster than the content has frames to show.
+        let targetRate = engine.nominalFrameRate
+        if targetRate != appliedFrameRate {
+            appliedFrameRate = targetRate
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: targetRate, maximum: targetRate, preferred: targetRate)
+        }
+
         guard let renderer, let metalLayer,
               let pixelBuffer = engine.copyPixelBufferForDisplay()
         else { return }
