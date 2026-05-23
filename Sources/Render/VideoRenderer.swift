@@ -5,7 +5,7 @@ import QuartzCore
 import simd
 
 /// The transfer function of the decoded video, matching the shader's branch IDs.
-private enum TransferFunction: UInt32 {
+enum TransferFunction: UInt32 {
     case sdr = 0
     case pq = 1
     case hlg = 2
@@ -15,6 +15,10 @@ private enum TransferFunction: UInt32 {
 /// CPU-side pixel copies. Each plane's IOSurface-backed memory is wrapped
 /// directly as a Metal texture; the shader performs color conversion, HDR
 /// transfer-function decoding, gamut conversion, and tone mapping.
+///
+/// The per-frame hot path is tight by design: pixel-buffer metadata, the
+/// render pass descriptor, and the aspect-fit scale are all cached across
+/// frames and only rebuilt when their inputs change.
 @MainActor
 final class VideoRenderer {
     let device: any MTLDevice
@@ -29,10 +33,40 @@ final class VideoRenderer {
     // skips a frame rather than blocking when every slot is occupied.
     private let inFlightSemaphore = DispatchSemaphore(value: VideoRenderer.maxFramesInFlight)
 
+    // Reused across frames; only the texture attachment changes per pass.
+    // makeRenderCommandEncoder captures the descriptor's contents at call
+    // time, so mutating it after each encoder is created is safe.
+    private let passDescriptor: MTLRenderPassDescriptor = {
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        descriptor.colorAttachments[0].storeAction = .store
+        return descriptor
+    }()
+
     // Keeps each in-flight frame's plane textures alive until the GPU is done.
     // A slot is only reused once its frame has signalled completion.
     private var textureRing = [[CVMetalTexture]](repeating: [], count: VideoRenderer.maxFramesInFlight)
     private var ringIndex = 0
+
+    // Metadata read from CVPixelBuffer attachments is constant for a given
+    // stream. Cache the decoded result and reuse it while the attachment
+    // references are unchanged. CoreVideo returns interned CFString constants
+    // for these attachments, so reference identity is a cheap, reliable
+    // invalidation signal.
+    private var cachedPixelFormat: OSType = 0
+    private var cachedMatrixAttachment: AnyObject?
+    private var cachedPrimariesAttachment: AnyObject?
+    private var cachedTransferAttachment: AnyObject?
+    private var cachedFrame: DecodedFrame?
+
+    // The aspect-fit scale is stable across frames at the same drawable size
+    // and source dimensions. Recompute only when one of the inputs changes.
+    private var cachedScale: SIMD2<Float> = SIMD2<Float>(1, 1)
+    private var cachedScaleSourceWidth: Int = 0
+    private var cachedScaleSourceHeight: Int = 0
+    private var cachedScaleDrawableWidth: CGFloat = 0
+    private var cachedScaleDrawableHeight: CGFloat = 0
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -73,20 +107,17 @@ final class VideoRenderer {
               let drawable = layer.nextDrawable()
         else { return }
 
-        var scale = aspectFitScale(videoWidth: CVPixelBufferGetWidthOfPlane(pixelBuffer, 0),
-                                   videoHeight: CVPixelBufferGetHeightOfPlane(pixelBuffer, 0),
-                                   into: layer.drawableSize)
+        var scale = aspectFitScale(
+            videoWidth: CVPixelBufferGetWidthOfPlane(pixelBuffer, 0),
+            videoHeight: CVPixelBufferGetHeightOfPlane(pixelBuffer, 0),
+            into: layer.drawableSize)
         var colorMatrix = frame.conversion.matrix
         var colorOffset = frame.conversion.offset
         var gamutMatrix = frame.gamut.matrix
         var transferFunction = frame.transferFunction.rawValue
         var displayHeadroom = max(headroom, 1.0)
 
-        let passDescriptor = MTLRenderPassDescriptor()
         passDescriptor.colorAttachments[0].texture = drawable.texture
-        passDescriptor.colorAttachments[0].loadAction = .clear
-        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        passDescriptor.colorAttachments[0].storeAction = .store
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor)
@@ -119,7 +150,7 @@ final class VideoRenderer {
 
     // MARK: - Frame decoding
 
-    private struct DecodedFrame {
+    struct DecodedFrame {
         let lumaFormat: MTLPixelFormat
         let chromaFormat: MTLPixelFormat
         let conversion: ColorConversion
@@ -128,13 +159,50 @@ final class VideoRenderer {
     }
 
     /// Reads the pixel format and color metadata needed to render the frame,
-    /// or nil if the frame is not a supported biplanar YCbCr format.
-    private func decodeFrame(_ pixelBuffer: CVPixelBuffer) -> DecodedFrame? {
+    /// or nil if the frame is not a supported biplanar YCbCr format. Results
+    /// are cached across frames keyed on the source attachment references —
+    /// CoreVideo returns interned CFString constants for these attachments,
+    /// so reference identity is a cheap and reliable invalidation signal.
+    func decodeFrame(_ pixelBuffer: CVPixelBuffer) -> DecodedFrame? {
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        let matrixAttachment = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as AnyObject?
+        let primariesAttachment = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) as AnyObject?
+        let transferAttachment = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) as AnyObject?
+
+        if let cachedFrame,
+           pixelFormat == cachedPixelFormat,
+           matrixAttachment === cachedMatrixAttachment,
+           primariesAttachment === cachedPrimariesAttachment,
+           transferAttachment === cachedTransferAttachment {
+            return cachedFrame
+        }
+
+        guard let frame = decodeFrameUncached(
+            pixelFormat: pixelFormat,
+            matrixName: matrixAttachment as? String,
+            primariesName: primariesAttachment as? String,
+            transferName: transferAttachment as? String)
+        else { return nil }
+
+        cachedPixelFormat = pixelFormat
+        cachedMatrixAttachment = matrixAttachment
+        cachedPrimariesAttachment = primariesAttachment
+        cachedTransferAttachment = transferAttachment
+        cachedFrame = frame
+        return frame
+    }
+
+    private func decodeFrameUncached(
+        pixelFormat: OSType,
+        matrixName: String?,
+        primariesName: String?,
+        transferName: String?
+    ) -> DecodedFrame? {
         let bitDepth: ColorConversion.BitDepth
         let lumaFormat: MTLPixelFormat
         let chromaFormat: MTLPixelFormat
 
-        switch CVPixelBufferGetPixelFormatType(pixelBuffer) {
+        switch pixelFormat {
         case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
             bitDepth = .ten
             lumaFormat = .r16Unorm
@@ -156,43 +224,38 @@ final class VideoRenderer {
         case .eight: .rec709
         }
 
-        let conversion = ColorConversion(
-            standard: ycbcrStandard(of: pixelBuffer, fallback: fallbackStandard),
-            bitDepth: bitDepth)
-        let gamut = GamutConversion(
-            from: sourcePrimaries(of: pixelBuffer, fallback: fallbackPrimaries),
-            to: .displayP3)
-        return DecodedFrame(lumaFormat: lumaFormat, chromaFormat: chromaFormat,
-                            conversion: conversion, gamut: gamut,
-                            transferFunction: transferFunction(of: pixelBuffer))
+        return DecodedFrame(
+            lumaFormat: lumaFormat,
+            chromaFormat: chromaFormat,
+            conversion: ColorConversion(
+                standard: ycbcrStandard(named: matrixName, fallback: fallbackStandard),
+                bitDepth: bitDepth),
+            gamut: GamutConversion(
+                from: sourcePrimaries(named: primariesName, fallback: fallbackPrimaries),
+                to: .displayP3),
+            transferFunction: transferFunction(named: transferName))
     }
 
-    /// Reads the YCbCr matrix attachment, falling back when it is absent.
-    private func ycbcrStandard(of pixelBuffer: CVPixelBuffer,
+    private func ycbcrStandard(named name: String?,
                                fallback: ColorConversion.Standard) -> ColorConversion.Standard {
-        guard let name = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String
-        else { return fallback }
+        guard let name else { return fallback }
         if name == kCVImageBufferYCbCrMatrix_ITU_R_2020 as String { return .rec2020 }
         if name == kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String { return .rec601 }
         if name == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String { return .rec709 }
         return fallback
     }
 
-    /// Reads the color primaries attachment, falling back when it is absent.
-    private func sourcePrimaries(of pixelBuffer: CVPixelBuffer,
+    private func sourcePrimaries(named name: String?,
                                  fallback: GamutConversion.Primaries) -> GamutConversion.Primaries {
-        guard let name = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) as? String
-        else { return fallback }
+        guard let name else { return fallback }
         if name == kCVImageBufferColorPrimaries_ITU_R_2020 as String { return .rec2020 }
         if name == kCVImageBufferColorPrimaries_ITU_R_709_2 as String { return .rec709 }
         if name == kCVImageBufferColorPrimaries_P3_D65 as String { return .displayP3 }
         return fallback
     }
 
-    /// Reads the transfer function attachment, defaulting to SDR when absent.
-    private func transferFunction(of pixelBuffer: CVPixelBuffer) -> TransferFunction {
-        guard let name = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) as? String
-        else { return .sdr }
+    private func transferFunction(named name: String?) -> TransferFunction {
+        guard let name else { return .sdr }
         if name == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String { return .pq }
         if name == kCVImageBufferTransferFunction_ITU_R_2100_HLG as String { return .hlg }
         return .sdr
@@ -214,15 +277,31 @@ final class VideoRenderer {
     }
 
     private func aspectFitScale(videoWidth: Int, videoHeight: Int, into size: CGSize) -> SIMD2<Float> {
-        guard size.width > 0, size.height > 0, videoWidth > 0, videoHeight > 0 else {
-            return SIMD2<Float>(1, 1)
+        if videoWidth == cachedScaleSourceWidth,
+           videoHeight == cachedScaleSourceHeight,
+           size.width == cachedScaleDrawableWidth,
+           size.height == cachedScaleDrawableHeight {
+            return cachedScale
         }
-        let videoAspect = Float(videoWidth) / Float(videoHeight)
-        let layerAspect = Float(size.width) / Float(size.height)
-        if videoAspect > layerAspect {
-            return SIMD2<Float>(1, layerAspect / videoAspect)
+
+        let scale: SIMD2<Float>
+        if size.width > 0, size.height > 0, videoWidth > 0, videoHeight > 0 {
+            let videoAspect = Float(videoWidth) / Float(videoHeight)
+            let layerAspect = Float(size.width) / Float(size.height)
+            if videoAspect > layerAspect {
+                scale = SIMD2<Float>(1, layerAspect / videoAspect)
+            } else {
+                scale = SIMD2<Float>(videoAspect / layerAspect, 1)
+            }
         } else {
-            return SIMD2<Float>(videoAspect / layerAspect, 1)
+            scale = SIMD2<Float>(1, 1)
         }
+
+        cachedScale = scale
+        cachedScaleSourceWidth = videoWidth
+        cachedScaleSourceHeight = videoHeight
+        cachedScaleDrawableWidth = size.width
+        cachedScaleDrawableHeight = size.height
+        return scale
     }
 }
